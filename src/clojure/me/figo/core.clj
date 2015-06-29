@@ -1,76 +1,41 @@
 (ns me.figo.core
-  (:require [base64-clj.core :as base64]
-            [clj-http.client :as client]
-            [clojure.data.json :as json])
-  (:import [java.net URLEncoder]))
+  (:require [clj-http.client :as client]
+            [clojure.data.json :as json]
+            [me.figo.util :as u]))
 
 
 (def ^:dynamic figo-api-end-point "https://api.figo.me/")
 (def ^:dynamic debug false )
 (def ^:dynamic timeout 5000)
 
-
-(defn as-url-encode
-  [v]
-  (URLEncoder/encode v "ISO-8859-1" ))
-
-
-(defn assoc-debug
+(defn assoc-default
   [req]
-  (if-not debug
-    req
-    (-> req
-        (assoc :debug true)
-        (assoc :debug-body true))))
+  (-> req
+      (u/assoc-debug debug)
+      (u/assoc-timeout timeout)))
 
-
-(defn make-auth-header
-  ;:todo Documentation
-  [client-id client-secret]
-  (let [basic (base64/encode (str client-id ":" client-secret))
-        headers {:headers {"Authorization: Basic " basic
-                           "username"              client-id
-                           "password"              client-secret}
-                 :body-encoding "UTF-8"
-                 :socket-timeout timeout  ;; in milliseconds
-                 :conn-timeout timeout    ;; in milliseconds
-                 :accept :json}]
-    (assoc-debug headers)))
-
-
-(defn make-token-header
-  ;:todo Documentation
-  [token]
-  (let [headers {:headers  {"Authorization" (str "Bearer " token)
-                            "Accept"        "application/json"
-                            "Content-Type"  "application/json"}
-                 :body-encoding "UTF-8"
-                 :socket-timeout timeout  ;; in milliseconds
-                 :conn-timeout timeout    ;; in milliseconds
-                 :accept :json}]
-    (assoc-debug headers)))
-
-
-(defn get-login-url
-  ;:todo Documentation
-  [client-id redirect-url scope state ]
+(defn login-url
+  "The URL a user should open in his/her web browser to start the login process. When the process is completed, the user is redirected to the URL provided
+   to the constructor and passes on an authentication code. This code can be converted into an access token for data access."
+  [^String client-id ^String redirect-url ^String scope ^String state]
   (try
     (str figo-api-end-point
-         "/auth/code?response_type=code&client_id=" (as-url-encode client-id)
-         "&redirect_uri=" (as-url-encode redirect-url)
-         "&scope=" (as-url-encode scope)
-         "&state=" (as-url-encode state))
+         "/auth/code?response_type=code&client_id=" (u/as-url-encode client-id)
+         "&redirect_uri=" (u/as-url-encode redirect-url)
+         "&scope=" (u/as-url-encode scope)
+         "&state=" (u/as-url-encode state))
     (catch Exception e
       nil)))
 
 
 (defn convert-authentication-code
-  ;:todo Documentation
-  [client-id client-secret auth-code]
+  "Convert the authentication code received as result of the login process into an access token usable for data access."
+  [^String client-id ^String client-secret ^String auth-code]
   {:pre [(string? auth-code)
          (string? client-id)
          (string? client-secret)]}
-  (let [req (-> (make-auth-header client-id client-secret)
+  (let [req (-> (u/auth-req client-id client-secret)
+                (assoc-default)
                 (assoc :form-params {"grant_type" "authorization_code"
                                      "code"       auth-code}))]
     (-> (client/post (str figo-api-end-point "auth/token") req)
@@ -79,9 +44,13 @@
 
 
 (defn convert-refresh-token
-  ;:todo Documentation
-  [client-id client-secret refresh-token]
-  (let [req (-> (make-auth-header client-id client-secret)
+  "Convert a refresh token (granted for offline access and returned by `convert_authentication_code`) into an access token usabel for data acccess."
+  [^String client-id ^String client-secret ^String refresh-token]
+  {:pre [(string? refresh-token)
+         (string? client-id)
+         (string? client-secret)]}
+  (let [req (-> (u/auth-req client-id client-secret)
+                (assoc-default)
                 (assoc :form-params {"grant_type" "refresh_token"
                                      "code"       refresh-token}))]
     (-> (client/post (str figo-api-end-point "auth/token") req)
@@ -90,21 +59,27 @@
 
 
 (defn revoke-token
-  ;:todo Documentation
-  [client-id client-secret refresh-token]
-  (let [req (make-auth-header client-id client-secret)]
-    (client/get (str figo-api-end-point "/auth/revoke?token=" (as-url-encode refresh-token)) req)
+  "Revoke a granted access or refresh token and thereby invalidate it. Note: this action has immediate effect, i.e. you will not be able use that token
+   anymore after this call."
+  [^String client-id ^String client-secret ^String refresh-token]
+  {:pre [(string? refresh-token)
+         (string? client-id)
+         (string? client-secret)]}
+  (let [req (-> (u/auth-req client-id client-secret)
+                (assoc-default))]
+    (client/get (str figo-api-end-point "/auth/revoke?token=" (u/as-url-encode refresh-token)) req)
     nil))
 
 
 (defn credential-login
-  ;:todo Documentation
-  [client-id client-secret user-name password]
+  "Login an user with his figo username and password credentials"
+  [^String client-id ^String client-secret ^String user-name ^String password]
   {:pre [(string? user-name)
          (string? password)
          (string? client-id)
          (string? client-secret)]}
-  (let [req (-> (make-auth-header client-id client-secret)
+  (let [req (-> (u/auth-req client-id client-secret)
+                (assoc-default)
                 (assoc :form-params {"grant_type" "password"
                                      "username"   user-name
                                      "password"   password}))
@@ -116,8 +91,9 @@
 
 (defn add-user*
   ;:todo Documentation
-  [client-id client-secret user]
-  (let [req (-> (make-auth-header client-id client-secret)
+  [^String client-id ^String client-secret ^String user]
+  (let [req (-> (u/auth-req client-id client-secret)
+                (assoc-default)
                 (assoc :form-params user))]
     (-> (client/post (str figo-api-end-point "auth/user") req)
         (:body)
@@ -127,23 +103,29 @@
 
 
 (defn add-user
-  ;:todo Documentation
-  [client-id client-secret & {:as user}]
+  "Create a new figo Account "
+  [^String client-id ^String client-secret & {:as user}]
+  {:pre [(string? client-id)
+         (string? client-secret)]}
   (add-user* client-id client-secret user))
 
 
 (defn add-user-and-login
-  ;:todo Documentation
-  [client-id client-secret & {:keys [email password] :as user}]
+  "Creates a new figo User and returns a login token"
+  [^String client-id ^String client-secret & {:keys [email password] :as user}]
+  {:pre [(string? client-id)
+         (string? client-secret)]}
   (do
     (add-user* client-id client-secret user)
     (credential-login client-id client-secret email password)))
 
 
 (defn get-user
-  ;:todo Documentation
-  [token ]
-  (let [header (make-token-header token)
+  "Get the current figo Account"
+  [^String token]
+  {:pre [(string? token)]}
+  (let [header (-> (u/token-req token)
+                   (assoc-default))
         url (str figo-api-end-point "rest/user")]
     (-> (client/get url header)
         (:body)
@@ -151,10 +133,12 @@
 
 
 (defn update-user
-  ;:todo Documentation
-  [token & {:as user}]
-  (let [req  (-> (make-token-header token)
-                 (assoc :form-params user))
+  "Modify figo Account"
+  [^String token & {:as user}]
+  {:pre [(string? token)]}
+  (let [req  (-> (u/token-req token)
+                 (assoc-default)
+                 (assoc :body (json/json-str user)))
         url (str figo-api-end-point "rest/user")]
     (-> (client/put url req)
         (:body)
@@ -162,27 +146,36 @@
 
 
 (defn remove-user
-  ;:todo Documentation
-  [token]
-  (let [req (make-token-header token)
+  "Delete figo Account"
+  [^String token]
+  {:pre [(string? token)]}
+  (let [req (-> (u/token-req token)
+                (assoc-default))
         url (str figo-api-end-point "rest/user")]
     (client/delete url req)
     nil))
 
 
 (defn get-supported-service
-  ;:todo Documentation
-  [token c-code]
-  (let [req (make-token-header token)
+  "Returns a list of all supported credit cards and payment services for a country"
+  [^String token ^String c-code]
+  {:pre [(string? token)
+         (string? c-code)]}
+  (let [req (-> (u/token-req token)
+                (assoc-default))
         url (str figo-api-end-point "/rest/catalog/services/" c-code )]
     (-> (client/get url req)
         (:body)
         (json/read-str :key-fn keyword))))
 
 (defn get-login-settings
-  ;:todo Documentation
-  [token c-code b-code]
-  (let [req (make-token-header token)
+  "Returns the login settings for a specified banking or payment service"
+  [^String token ^String c-code ^String b-code]
+  {:pre [(string? token)
+         (string? c-code)
+         (string? b-code)]}
+  (let [req (-> (u/token-req token)
+                (assoc-default))
         url (str figo-api-end-point "/rest/catalog/banks/" c-code "/" b-code )]
     (-> (client/get url req)
         (:body)
@@ -190,68 +183,65 @@
 
 
 (defn setup-new-account
-  ;:todo Documentation
-  [token & {:as a-request}]
-  (let [req (make-token-header token)
-        req (assoc req :from-params a-request)
+  "Returns a TaskToken for a new account creation task"
+  [^String token & {:as a-request}]
+  {:pre [(string? token)]}
+  (let [req (-> (u/token-req token)
+                (assoc-default)
+                (assoc :from-params a-request))
         url (str figo-api-end-point "/rest/accounts")]
     (-> (client/post url req)
         (:body)
         (json/read-str :key-fn keyword))))
 
+;(setup-new-account 3 )
 
 (defn setup-and-sync-account
-  [token & {:as a-request}]
+  "Setups an account an starts the initial syncronization directly"
+  [^String token & {:as a-request}]
+  {:pre [(string? token)]}
   ; :todo Need to implement
   )
 
 
 
 
-(defn get-accounts
-  ;:todo Documentation
-  [token]
-  {:pre [(string? token)]}
-  (let [params (make-token-header token)
-        url (str figo-api-end-point "rest/accounts")]
-    (-> (client/get url params)
-        (:body)
-        (json/read-str :key-fn keyword))))
-
-
 (defn get-account
-  ;:todo Documentation
-  [token id]
-  {:pre [(string? token)
-         [string? id]]}
-  (let [params (make-token-header token)
-        url (str figo-api-end-point "rest/accounts/" id)]
+  "All accounts the user has granted your App access to"
+  [^String token & id]
+  {:pre [(string? token)]}
+  (let [params (-> (u/token-req token)
+                   (assoc-default))
+        url (if id
+              (str figo-api-end-point "rest/accounts/" id)
+              (str figo-api-end-point "rest/accounts"))]
     (-> (client/get url params)
         (:body)
         (json/read-str :key-fn keyword))))
+
 
 
 (defn update-account
-  ;:todo Documentation
-  [token a-map]
-  {:pre [(string? token)
-         [map? a-map]]}
-  (let [select-ks [:account_id :name :owner :preferred_tan_scheme :auto_sync]
-        a-map (select-keys a-map select-ks)
-        id (:account_id a-map)
-        p (-> (make-token-header token)
-              (assoc :form-params a-map))
-        url (str figo-api-end-point "rest/accounts/" id)]
-    (client/put url p)
-    nil))
+  "Modify an account"
+  [^String token & {:keys [account_id] :as params}]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default)
+              (assoc :form-params params))
+        url (str figo-api-end-point "rest/accounts/" account_id)]
+    (->
+      (client/put url p)
+      (:body)
+      (json/read-str :key-fn keyword))))
 
 
 (defn remove-account
-  ;:todo Documentation
-  [token id]
+  "Remove an account"
+  [^String token id]
   {:pre [(string? token)
-         [string? id]]}
-  (let [header (make-token-header token)
+         (string? id)]}
+  (let [header (-> (u/token-req token)
+                   (assoc-default))
         url (str figo-api-end-point "rest/accounts/" id)]
     (client/delete url  header )
     nil))
@@ -259,9 +249,11 @@
 
 
 (defn get-account-balance
-  ;:todo Documentation
-  [token id]
-  (let [params (make-token-header token)
+  "Returns the balance details of the account with he specified ID"
+  [^String token id]
+  {:pre [(string? token)]}
+  (let [params (-> (u/token-req token)
+                   (assoc-default))
         url (str figo-api-end-point "rest/accounts/"  id "/balance")]
     (-> (client/get url params)
         (:body)
@@ -269,24 +261,27 @@
 
 
 (defn update-account-balance
-  ;:todo Documentation
-  [token b-map]
-  (let [select-ks [:account_id :credit_line :monthly_spending_limit :cents  ]
-        account-id (:account_id b-map)
-        b-map (select-keys b-map select-ks)
-        p (-> (make-token-header token)
-              (assoc :form-params b-map))
-        url (str figo-api-end-point "rest/accounts/" account-id "/balance")]
-    (client/put url p)
-    nil))
+  "Modify balance or account limits"
+  [^String token & {:keys [account_id] :as params}]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default)
+              (assoc :form-params params))
+        url (str figo-api-end-point "rest/accounts/" account_id "/balance")]
+    (->
+      (client/put url p)
+      (:body)
+      (json/read-str :key-fn keyword))))
 
 
 (defn set-account-orders
-  ;:todo Documentation
-  [token & a-coll]
+  "Set new bank account sorting order"
+  [^String token & a-coll]
+  {:pre [(string? token)]}
   (let [v-coll (mapv (fn [v] {:account_id v}) a-coll)
         a-coll (json/json-str {:accounts v-coll})
-        p (-> (make-token-header token)
+        p (-> (u/token-req token)
+              (assoc-default)
               (assoc :body a-coll))
         url (str figo-api-end-point "rest/accounts")]
     (client/put url p)
@@ -294,12 +289,14 @@
 
 
 (defn get-transactions
-  ;:todo Documentation
-  [token & {:keys [account_id] :as s-t-map}]
+  "All transactions on all account of the user"
+  [^String token & {:keys [account_id] :as s-t-map}]
+  {:pre [(string? token)]}
   (let [url (if account_id
               (str figo-api-end-point "rest/accounts/"  account_id  "/transactions?")
               (str figo-api-end-point "rest/transactions?" ))
-        p (-> (make-token-header token)
+        p (-> (u/token-req token)
+              (assoc-default)
               (assoc :query-params (or s-t-map {})))]
     (-> (client/get url p)
         (:body)
@@ -308,81 +305,33 @@
 
 
 (defn modify-transaction
-  ;:todo Documentation
-  [token account_id transaction_id & visited ]
-  (let [header (make-token-header token)
-        url   (str figo-api-end-point "rest/accounts/"  account_id  "/transactions/" transaction_id)
-        p (if visited
-            (assoc header :form-params {:visited visited})
-            header)]
-    (client/put url p)))
-
-
-(defn modify-transactions
-  ;:todo Documentation
-  [token visited & {:keys [account_id]}]
-  (let [header (make-token-header token)
+  "Modifies the visited field of a specific transaction"
+  [^String token visited & {:keys [account_id transaction_id]}]
+  {:pre [(string? token)]}
+  (let [header (-> (u/token-req token)
+                   (assoc-default))
         url (if account_id
-              (str figo-api-end-point "rest/accounts/"  account_id  "/transactions")
+              (if transaction_id
+                (str figo-api-end-point "rest/accounts/" account_id  "/transactions/" transaction_id)
+                (str figo-api-end-point "rest/accounts/" account_id "/transactions"))
               (str figo-api-end-point "rest/transactions" ))
         p (if visited
             (assoc header :form-params {:visited visited})
             header)]
-    (client/put url p)))
+    (client/put url p)
+    nil))
 
 
 (defn remove-transaction
-  ;:todo Documentation
-  [token account_id transaction_id]
-  (let [header  (make-token-header token)
+  "Removes a Transaction"
+  [^String token account_id transaction_id]
+  {:pre [(string? token)]}
+  (let [header (-> (u/token-req token)
+                   (assoc-default))
         url   (str figo-api-end-point "rest/accounts/"  account_id  "/transactions/" transaction_id)]
-    (client/delete url header)))
+    (client/delete url header)
+    nil))
 
-
-
-
-
-(comment
-
-
-
-  (json/json-str {:accounts [{:account_id "A1117215.2" }
-                             {:account_id "A1117215.1" }
-                             {:account_id "A1117215.3" }]})
-
-  (binding [debug-body false
-            debug false]
-    (let [m {:client-id "CPocl5egXH1XQwV4XFGb5KGAVI5XihrmNC9ZKMm3Dyjc"
-             :secret    "Sl7mrzkzYprH7D5gdxiKyVMtyKF_xEtIOBsVsZ4VqbZ0"
-             :user-name "mamuninfo@gmail.com"
-             :password  "letmein"}
-          {:keys [access_token]} (credential-login m)
-          w (:accounts (get-accounts access_token))
-          amap (map :account_id w)
-          _ (println amap)
-          a (get-in w [0 :account_id])
-          ;         r (get-account access_token a)
-          ; r (assoc r :auto_sync "false"  )
-          ;  _ (clojure.pprint/pprint r)
-          ;r (update-account access_token (dissoc r :preferred_tan_scheme :auto_sync))
-          ;_ (println a)
-          r (get-account-balance access_token a)
-          ;_ (println r)
-          ;r (update-account-balance access_token a (assoc r :credit_line 300)  )
-
-          r {:accounts [{:account_id "A1117215.2" }
-                        {:account_id "A1117215.1" }
-                        {:account_id "A1117215.3" }]}
-;          r (set-account-orders access_token r)
-          ]
-      (-> (get-transactions access_token :account_id "A1117215.2")
-
-          (clojure.pprint/pprint))
-      ))
-
-  )
-
-;accountId, String since, Integer count, Integer offset, Boolean include_pending
 
 
 ;;;;;;;;;;;;;;;;;, Security API
@@ -390,9 +339,11 @@
 
 
 (defn get-security
-  ;:todo Documentation
-  [token account_id security_id & cents 	]
-  (let [header (make-token-header token)
+  "Retrieves a specific security"
+  [^String token account_id security_id & cents]
+  {:pre [(string? token)]}
+  (let [header (-> (u/token-req token)
+                   (assoc-default))
         url (str figo-api-end-point "rest/accounts/"  account_id  "/securities/" security_id)
         p (if cents
             (assoc header :query-params {:cents cents})
@@ -403,9 +354,11 @@
 
 
 (defn get-securities
-  ;:todo Documentation
-  [token & {:keys [account_id] :as s-t-map}]
-  (let [p (-> (make-token-header token)
+  "Retrieves all securities of the current user"
+  [^String token & {:keys [account_id] :as s-t-map}]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default)
               (assoc :query-params (or s-t-map {})))
         url (if account_id
               (str figo-api-end-point "rest/accounts/"  account_id  "/securities")
@@ -416,14 +369,16 @@
 
 
 (defn modify-securities
-  ;:todo Documentation
-  [token visited & {:keys [account_id]}]
-  (let [header (make-token-header token)
-        p (assoc header :form-params {:visited visited})
+  "Modifies the visited field of a specific security"
+  [^String token visited & {:keys [account_id]}]
+  {:pre [(string? token)]}
+  (let [req (-> (u/token-req token)
+                (assoc-default)
+                (assoc :form-params {:visited visited}))
         url (if account_id
               (str figo-api-end-point "rest/accounts/"  account_id  "/securities/")
               (str figo-api-end-point "rest/securities"))]
-    (client/put url p)
+    (client/put url req)
     nil))
 
 
@@ -432,40 +387,48 @@
 
 
 (defn get-bank
-  ;:todo Documentation
-  [token bank-id]
-  (let [p (-> (make-token-header token))
+  "Get bank"
+  [^String token ^String bank-id]
+  {:pre [(string? token)
+         (string? bank-id)]}
+  (let [req   (-> (u/token-req token)
+                  (assoc-default))
         url (str figo-api-end-point "rest/bank/" bank-id)]
-    (-> (client/get url p)
+    (-> (client/get url req)
         (:body)
         (json/read-str :key-fn keyword))))
 
 
 (defn update-bank
-  ;:todo Documentation
-  [token & {:keys [bank_id] :as s-t-map}]
-  (let [p (-> (make-token-header token)
-              (assoc :form-params (or s-t-map {})))
+  "Modify a bank"
+  [^String token & {:keys [bank_id] :as s-t-map}]
+  {:pre [(string? token)]}
+  (let [req (-> (u/token-req token)
+                (assoc-default)
+                (assoc :form-params (or s-t-map {})))
         url (str figo-api-end-point "rest/banks/" bank_id)]
-    (->
-      (client/put url p)
-      (:body)
-      (json/read-str :key-fn keyword))))
+    (-> (client/put url req)
+        (:body)
+        (json/read-str :key-fn keyword))))
 
 
 (defn remove-bank-pin
-  ;:todo Documentation
-  [token bank-id]
-  (let [p (make-token-header token)
+  "Remove the stored PIN for a bank (if there was one)"
+  [^String token bank-id]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default))
         url (str figo-api-end-point "rest/banks/" bank-id "/remove_pin")]
     (client/post url p)
     nil))
 
 
 (defn get-notification
-  ;:todo Documentation
-  [token notification-id]
-  (let [p (make-token-header token)
+  "All notifications registered by this client for the user"
+  [^String token notification-id]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default))
         url (str figo-api-end-point "rest/notifications/" notification-id )]
     (-> (client/get url p)
         (:body)
@@ -473,9 +436,11 @@
 
 
 (defn add-notification
-  ;:todo Documentation
-  [token & { :as s-t-map}]
-  (let [p (-> (make-token-header token)
+  "Register a new notification on the server for the user"
+  [^String token & { :as s-t-map}]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default)
               (assoc :form-params (or s-t-map {})))
         url (str figo-api-end-point "rest/notifications" )]
     (-> (client/post url p)
@@ -484,22 +449,37 @@
 
 
 (defn update-notification
-  ;:todo Documentation
-  [token notification-id]
-  (let [p (make-token-header token)
+  "Update a stored notification"
+  [^String token & {:keys [notification_id] :as noti} ]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default)
+              (assoc :body noti))
+        url (str figo-api-end-point "rest/notifications/" notification_id )]
+    (-> (client/put url p)
+        (:body)
+        (json/read-str :key-fn keyword))))
+
+
+(defn delete-notification
+  "Update a stored notification"
+  [^String token notification-id]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default))
         url (str figo-api-end-point "rest/notifications/" notification-id )]
     (client/delete url p)
-    nil
-    ))
-
+    nil))
 
 ;;;;;;;;;;;;;;Payment
 
 
 (defn get-payments
-  ;:todo Documentation
-  [token & {:keys [account_id payment_id]}]
-  (let [p (make-token-header token)
+  "Retrieve all payments"
+  [^String token & {:keys [account_id payment_id]}]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default))
         url (if account_id
               (if payment_id
                 (str figo-api-end-point "rest/accounts/" account_id "/payments/" payment_id)
@@ -512,9 +492,11 @@
 
 
 (defn add-payment
-  ;:todo Documentation
-  [token account_id & {:as payment}]
-  (let [p (-> (make-token-header token)
+  "add payment"
+  [^String token account_id & {:as payment}]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default)
               (assoc :form-params (or payment {})))
         url (str figo-api-end-point "rest/accounts/" account_id "/payments")]
     (-> (client/post url p)
@@ -523,9 +505,11 @@
 
 
 (defn add-container-payment
-  ;:todo Documentation
-  [token & {:keys [account_id] :as payment}]
-  (let [p (-> (make-token-header token)
+  "add payment"
+  [^String token & {:keys [account_id] :as payment}]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default)
               (assoc :form-params (or payment {})))
         url (str figo-api-end-point "rest/accounts/" account_id "/payments")]
     (-> (client/post url p)
@@ -534,9 +518,11 @@
 
 
 (defn get-payment-proposal
-  ;:todo Documentation
-  [token ]
-  (let [p (-> (make-token-header token))
+  "Returns a list of PaymentProposals"
+  [^String token ]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default))
         url (str figo-api-end-point "/rest/adress_book" )]
     (-> (client/get url p)
         (:body)
@@ -544,9 +530,11 @@
 
 
 (defn update-payment
-  ;:todo Documentation
-  [token & {:keys [account_id payment_id] :as payment}]
-  (let [p (-> (make-token-header token)
+  "Update a stored payment"
+  [^String token & {:keys [account_id payment_id] :as payment}]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default)
               (assoc :form-params (or payment {})))
         url (str figo-api-end-point "rest/accounts/" account_id "/payments/" payment_id)]
     (-> (client/put url p)
@@ -555,17 +543,20 @@
 
 
 (defn remove-payment
-  ;:todo Documentation
-  [token account_id payment_id]
-  (let [p (make-token-header token)
+  "Remove a stored payment from the server"
+  [^String token account_id payment_id]
+  {:pre [(string? token)]}
+  (let [p (-> (u/token-req token)
+              (assoc-default))
         url (str figo-api-end-point "rest/accounts/" account_id "/payments/" payment_id)]
     (-> (client/delete url p))
     nil))
 
 
 (defn submit-payment
-  ;:todo Documentation
-  [token account_id payment_id tanSchemeId state & redirect-uri]
+  "Submit payment to bank server"
+  [^String token account_id payment_id tanSchemeId state & redirect-uri]
+  {:pre [(string? token)]}
   (let [p {:account_id    account_id
            :payment_id    payment_id
            :state         state
@@ -573,7 +564,8 @@
         p (if redirect-uri
             (assoc p :redirect_uri redirect-uri)
             p)
-        p (-> (make-token-header token)
+        p (-> (u/token-req token)
+              (assoc-default)
               (assoc :form-params p))
         url (str figo-api-end-point "rest/accounts/" account_id "/payments/" payment_id)
 
@@ -585,11 +577,14 @@
 
 
 (defn get-sync-url
-  ;:todo Documentation
-  [token state redirect-uri]
+  "URL to trigger a synchronisation. The user should open this URL in a web browser to synchronize his/her accounts with the respective bank servers. When
+   the process is finished, the user is redirected to the provided URL."
+  [^String token state redirect-uri]
+  {:pre [(string? token)]}
   (let [p {:state         state
            :redirect_uri redirect-uri}
-        h (->(make-token-header token)
+        h (->(u/token-req token)
+             (assoc-default)
              (assoc :form-params p))
         url (str figo-api-end-point "rest/sync")
         resp (-> (client/post url h)
@@ -601,20 +596,24 @@
 
 
 (defn get-task-state
-  ;:todo Documentation
-  [token  & {:keys [id] :as token-resp}]
-  (let [p (->(make-token-header token)
+  "Get the current status of a Task"
+  [^String token  & {:keys [id] :as token-resp}]
+  {:pre [(string? token)]}
+  (let [p (->(u/token-req token)
+             (assoc-default)
              (assoc :form-params (or token-resp {})))
-        url (str figo-api-end-point "rest/progress?id=" id)]
+        url (str figo-api-end-point "task/progress?id=" id)]
     (-> (client/post url p)
         (:body)
         (json/read-str :key-fn keyword))))
 
 
 (defn submit-response-to-task
-  ;:todo Documentation
-  [token id response type]
-  (let [header (make-token-header token)
+  "Response to a running Task."
+  [^String token id response type]
+  {:pre [(string? token)]}
+  (let [header (-> (u/token-req token)
+                   (assoc-default))
         req {:id id}
         req (condp = type
               :pin (assoc req :pin response)
@@ -624,7 +623,7 @@
               req)
         req (-> header
                 (assoc :form-params req))
-        url (str figo-api-end-point "rest/progress?id=" id)]
+        url (str figo-api-end-point "task/progress?id=" id)]
     (-> (client/post url req)
         (:body)
         (json/read-str :key-fn keyword))))
@@ -632,30 +631,44 @@
 
 
 (defn start-task
-  ;:todo Documentation
-  [token id]
-  (let [header (make-token-header token)
-        url (str figo-api-end-point "rest/progress?id=" id)]
+  "Start communication with bank server."
+  [^String token id]
+  {:pre [(string? token)]}
+  (let [header (-> (u/token-req token)
+                   (assoc-default))
+        url (str figo-api-end-point "task/start?id=" id)]
     (-> (client/get url header))
     nil))
 
 
 (defn cancel-task
-  ;:todo Documentation
-  [token id]
-  (let [header (make-token-header token)
-        url (str figo-api-end-point "rest/progress?id=" id)]
+  "Cancels a given task if possible"
+  [^String token id]
+  {:pre [(string? token)]}
+  (let [header (-> (u/token-req token)
+                   (assoc-default))
+        url (str figo-api-end-point "task/cancel?id=" id)]
     (client/post url header)
     nil))
 
 
+(defn start-process
+  [^String token process-token ]
+  {:pre [(string? token)]}
+  (let [req (-> (u/token-req token)
+                (assoc-default))
+        url (str figo-api-end-point "process/start?id=" process-token)]
+    (-> (client/post url req))
+    nil))
+
 (defn create-process
   ;:todo Documentation
-  [token & {:as b-process}]
-  (let [header (make-token-header token)
-        url (str figo-api-end-point "client/process" )
-        req (-> header
-                (assoc :form-params b-process))]
+  [^String token & {:as b-process}]
+  {:pre [(string? token)]}
+  (let [req (-> (u/token-req token)
+                (assoc-default)
+                (assoc :form-params b-process))
+        url (str figo-api-end-point "client/process" )]
     (-> (client/post url req)
         (:body)
         (json/read-str :key-fn keyword))))
